@@ -1,3 +1,5 @@
+# PayScale HTTPE — High-Throughput Transaction Processing Engine
+
 **Zetheta Algorithms Private Limited — Software Engineer HTTPE Assessment**
 
 > Strictly Private and Confidential — Not for Circulation. This repository is submitted for individual assessment purposes as part of Zetheta's HTTPE project. All content is original work produced under the 15-day project methodology (Part D of the project brief).
