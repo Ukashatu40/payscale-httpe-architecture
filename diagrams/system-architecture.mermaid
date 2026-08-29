@@ -1,0 +1,60 @@
+%% diagrams/system-architecture.mermaid
+graph TB
+    subgraph Client["Clients"]
+        MOB[Mobile/Web Apps]
+        MERCH[Merchant Systems]
+    end
+
+    subgraph Edge["Edge Layer"]
+        LB[Load Balancer<br/>AWS ALB - L7]
+        GW[API Gateway<br/>Kong/Envoy]
+    end
+
+    subgraph Core["Transaction Core"]
+        ORCH[Transaction Orchestrator<br/>Saga State Machine]
+        PAY[Payment Processing Service]
+        ACC[Account Service]
+        FRAUD[Fraud Detection Service]
+    end
+
+    subgraph Async["Async Layer"]
+        KAFKA[(Kafka Cluster<br/>3+ brokers)]
+        NOTIFY[Notification Service]
+        RECON[Reconciliation Service]
+        AUDIT[Audit & Compliance Service]
+    end
+
+    subgraph Data["Data Layer"]
+        PG[(PostgreSQL + Citus<br/>Sharded Cluster)]
+        REDIS[(Redis Cluster<br/>Cache + Idempotency)]
+    end
+
+    subgraph Obs["Observability"]
+        PROM[Prometheus/Grafana]
+        JAEGER[Jaeger Tracing]
+    end
+
+    MOB --> LB
+    MERCH --> LB
+    LB --> GW
+    GW --> ORCH
+    GW -.rate limit check.-> REDIS
+
+    ORCH --> PAY
+    ORCH -.idempotency check.-> REDIS
+    PAY --> ACC
+    PAY --> FRAUD
+    FRAUD -.feature lookup.-> REDIS
+    ACC --> PG
+
+    ORCH -- outbox event --> KAFKA
+    KAFKA --> NOTIFY
+    KAFKA --> RECON
+    KAFKA --> AUDIT
+    RECON --> PG
+    AUDIT --> PG
+    NOTIFY -.WebSocket/push.-> MOB
+
+    Core -.metrics/traces.-> PROM
+    Core -.traces.-> JAEGER
+    Async -.metrics.-> PROM
