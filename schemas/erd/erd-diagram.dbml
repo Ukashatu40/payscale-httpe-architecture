@@ -1,0 +1,109 @@
+// schemas/erd/erd-diagram.dbml
+
+Table users {
+  user_id uuid [pk]
+  phone_number_hash varchar(128) [unique, not null]
+  email_hash varchar(128)
+  full_name varchar(255) [not null]
+  kyc_status kyc_status_enum [not null, default: 'PENDING']
+  kyc_verified_at timestamptz
+  risk_tier risk_tier_enum [not null, default: 'MEDIUM']
+  status user_status_enum [not null, default: 'ACTIVE']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table accounts {
+  account_id uuid [pk]
+  user_id uuid [not null, ref: > users.user_id]
+  account_type account_type_enum [not null]
+  currency char(3) [not null, default: 'INR']
+  available_balance decimal(18,4) [not null, note: 'CHECK >= 0']
+  ledger_balance decimal(18,4) [not null]
+  version bigint [not null, default: 1, note: 'OCC version counter']
+  status account_status_enum [not null, default: 'ACTIVE']
+  tier account_tier_enum [not null, default: 'BASIC']
+  shard_key int [not null]
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table transactions {
+  transaction_id uuid [pk]
+  idempotency_key varchar(128) [unique, not null]
+  transaction_type transaction_type_enum [not null]
+  source_account_id uuid [ref: > accounts.account_id]
+  destination_account_id uuid [ref: > accounts.account_id]
+  amount decimal(18,4) [not null, note: 'CHECK > 0']
+  status transaction_status_enum [not null, default: 'INITIATED']
+  saga_id uuid [not null]
+  failure_reason varchar(500)
+  created_at timestamptz [not null]
+  completed_at timestamptz
+  metadata jsonb
+}
+
+Table ledger_entries {
+  ledger_entry_id uuid [pk]
+  transaction_id uuid [not null, ref: > transactions.transaction_id]
+  account_id uuid [not null, ref: > accounts.account_id]
+  entry_type ledger_entry_type_enum [not null]
+  amount decimal(18,4) [not null, note: 'CHECK > 0']
+  currency char(3) [not null, default: 'INR']
+  balance_after decimal(18,4) [not null]
+  entry_sequence smallint [not null]
+  reversal_of_entry_id uuid [ref: > ledger_entries.ledger_entry_id]
+  created_at timestamptz [not null, note: 'append-only, no updates']
+}
+
+Table transaction_events {
+  event_id uuid [pk]
+  transaction_id uuid [not null, ref: > transactions.transaction_id]
+  saga_id uuid [not null]
+  from_state varchar(50)
+  to_state varchar(50) [not null]
+  event_type event_type_enum [not null]
+  actor varchar(100) [not null]
+  payload jsonb
+  created_at timestamptz [not null, note: 'append-only']
+}
+
+Table fraud_rules {
+  rule_id uuid [pk]
+  rule_name varchar(255) [not null]
+  rule_type fraud_rule_type_enum [not null]
+  condition jsonb [not null]
+  action fraud_rule_action_enum [not null]
+  priority int [not null, default: 100]
+  is_active boolean [not null, default: true]
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  created_by varchar(100) [not null]
+}
+
+Table merchant_settlements {
+  settlement_id uuid [pk, note: 'aka batch_id']
+  merchant_account_id uuid [not null, ref: > accounts.account_id]
+  settlement_window_start timestamptz [not null]
+  settlement_window_end timestamptz [not null]
+  total_transaction_count int [not null, note: 'CHECK <= 100000']
+  processed_count int [not null, default: 0]
+  failed_chunk_count int [not null, default: 0]
+  total_amount decimal(18,4) [not null]
+  status settlement_status_enum [not null, default: 'PENDING']
+  created_at timestamptz [not null]
+  completed_at timestamptz
+}
+
+Table notification_log {
+  notification_id uuid [pk]
+  transaction_id uuid
+  user_id uuid [not null, ref: > users.user_id]
+  channel notification_channel_enum [not null]
+  notification_type varchar(100) [not null]
+  status notification_status_enum [not null, default: 'QUEUED']
+  retry_count int [not null, default: 0]
+  payload jsonb
+  created_at timestamptz [not null]
+  delivered_at timestamptz
+}
