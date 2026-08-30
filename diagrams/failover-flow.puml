@@ -1,0 +1,74 @@
+@startuml
+' diagrams/failover-flow.puml
+title System Failover — Database Primary Loss (maps to Chaos Experiment CE-001)
+
+participant "Monitoring /\nHealth Checks" as MON
+database "DB Shard N\n(PRIMARY)" as PRIMARY #FFCCCC
+participant "Patroni\n(HA Manager)" as PATRONI
+database "DB Shard N\n(REPLICA — most\ncaught-up WAL)" as REPLICA
+participant "PgBouncer" as PGB
+participant "Account Svc" as ACC
+participant "Transaction\nOrchestrator" as ORCH
+queue "Kafka" as KAFKA
+
+PRIMARY -x PRIMARY: **crash / becomes unresponsive**
+MON -> PRIMARY: health check
+PRIMARY --> MON: **no response** (missed heartbeats)
+
+note over MON, PATRONI
+  Detection window: configured health-check
+  interval + failure threshold, targeting
+  well under the 30s single-component RTO.
+end note
+
+MON -> PATRONI: primary unhealthy, initiate failover
+PATRONI -> REPLICA: check WAL position\n(select most caught-up replica)
+PATRONI -> REPLICA: **promote to PRIMARY**
+REPLICA -> REPLICA: replay any remaining WAL,\naccept new writes
+
+note over PATRONI #FFCCCC
+  **Fencing:** old primary (if it recovers) is
+  fenced via a monotonically increasing epoch/
+  fencing token, preventing a split-brain where
+  both nodes accept writes simultaneously
+  (mitigates FM-004: network partition / split-brain).
+end note
+
+PATRONI -> PGB: update routing config\n(new primary endpoint)
+PGB -> PGB: reload connection pool,\ndrain connections to old primary
+
+par in-flight requests during the gap
+  ACC -> PRIMARY: UPDATE accounts ... (in flight at crash time)
+  PRIMARY --> ACC: **connection failure**
+  ACC -> ACC: CB-DB-PRIMARY trips\n(2 failures / 5s threshold)
+  note over ACC
+    Fallback per reference table:
+    "Route reads to replica; queue writes"
+    Writes are queued (bounded queue, timeout-
+    bound) rather than immediately failed, to
+    absorb the failover window gracefully.
+  end note
+end
+
+PGB -> REPLICA: new connections routed here\n(now acting as primary)
+ACC -> REPLICA: retry queued writes
+REPLICA --> ACC: success
+
+ORCH -> ORCH: periodic sweep (10s interval)\nfinds any sagas mid-flight on shard N\nat crash time
+alt saga step had not committed
+  ORCH -> ORCH: resume saga (retry step against new primary)
+else saga step had partially committed elsewhere
+  ORCH -> ORCH: trigger compensation\n(per Failure Scenario 2 logic)
+end
+
+ACC -> ACC: CB-DB-PRIMARY: HALF_OPEN,\nprobe succeeds, CLOSED
+KAFKA -->> KAFKA: **unaffected** — separate failure\ndomain, other shards' events\ncontinue processing normally
+
+note over MON, ORCH
+  **Success criteria (ties to CE-001):**
+  Zero committed transaction loss;
+  p99 < 5s during the failover window;
+  full recovery within 30s RTO.
+end note
+
+@enduml

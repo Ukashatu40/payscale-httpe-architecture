@@ -1,0 +1,54 @@
+@startuml
+' diagrams/batch-settlement-flow.puml
+title Batch Merchant Settlement — Chunked Processing (up to 100,000 txns)
+
+participant "Scheduler" as SCHED
+participant "Settlement\nService" as SETTLE
+database "PostgreSQL\n(merchant_settlements)" as DB
+participant "Account Svc\n(Settlement Pool)" as POOL
+participant "Account Svc\n(Merchant Shard)" as MERCH
+queue "Kafka" as KAFKA
+participant "Notification Svc" as NOTIFY
+participant "Reconciliation Svc" as RECON
+
+SCHED -> SETTLE: trigger(merchant_id, batch_window)
+SETTLE -> DB: SELECT pending transactions\nWHERE merchant_id=M AND settled=false\n[cursor-based pagination, chunk_size=1000]
+SETTLE -> DB: INSERT merchant_settlements\n(status=PROCESSING, total_count=N, batch_id=B)
+
+note over SETTLE
+  **Design note (resolves flagged contradiction #4):**
+  This is deliberately NOT a single all-or-nothing
+  saga across 100,000 legs. A single giant saga would
+  make one bad row block the entire batch and would
+  hold no meaningful lock-scope benefit. Instead: chunked,
+  resumable processing — each chunk is independently
+  committed, retried, or marked failed for manual review,
+  and the batch as a whole tracks partial-completion state.
+end note
+
+loop for each chunk (up to 100 chunks of 1000 txns)
+  SETTLE -> POOL: debit(settlement_pool_account, chunk_total)
+  POOL -> DB: UPDATE ... OCC version check
+  DB --> POOL: success
+  SETTLE -> MERCH: credit(merchant_account, chunk_total)
+  MERCH -> DB: UPDATE ... OCC version check
+
+  alt chunk succeeds
+    DB --> MERCH: success
+    SETTLE -> DB: INSERT ledger_entries (chunk debit/credit pair)\nUPDATE merchant_settlements\nSET processed_count += 1000
+  else chunk fails (OCC conflict / shard unavailable)
+    DB --> MERCH: error
+    SETTLE -> SETTLE: retry chunk (max 3 attempts,\nexponential backoff + jitter)
+    alt retries exhausted
+      SETTLE -> DB: mark chunk FAILED,\nlog for manual reconciliation
+      note right: batch continues to next chunk —\na failed chunk does not block the rest
+    end
+  end
+end
+
+SETTLE -> DB: UPDATE merchant_settlements\nSET status = (COMPLETED | PARTIALLY_COMPLETED),\ncompleted_at = now()
+SETTLE -> KAFKA: outbox: settlement.completed\n{batch_id, total_settled, failed_chunk_count}
+KAFKA -->> NOTIFY: notify merchant (webhook/email)
+KAFKA -->> RECON: verify sum(debits) = sum(credits) for batch B
+
+@enduml

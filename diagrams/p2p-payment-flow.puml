@@ -1,0 +1,203 @@
+@startuml
+' diagrams/p2p-payment-flow.puml
+' Diagram 1 of 4: HAPPY PATH
+title P2P Payment — Happy Path
+
+actor Client
+participant "API Gateway" as GW
+participant "Transaction\nOrchestrator" as ORCH
+participant "Redis\n(idempotency)" as REDIS
+participant "Payment\nProcessing Svc" as PAY
+participant "Fraud\nDetection Svc" as FRAUD
+participant "Account Svc\n(Shard A - sender)" as ACC_A
+participant "Account Svc\n(Shard B - receiver)" as ACC_B
+database "PostgreSQL\n(Citus)" as DB
+queue "Kafka" as KAFKA
+
+Client -> GW: POST /payments\n(Idempotency-Key: K1)
+GW -> ORCH: forward request
+ORCH -> REDIS: GET idempotency:K1
+REDIS --> ORCH: not found
+ORCH -> DB: INSERT transaction\n(status=INITIATED, saga_id)
+ORCH -> REDIS: SET idempotency:K1 = IN_PROGRESS (TTL 24h)
+
+ORCH -> PAY: process(txn)
+PAY -> FRAUD: evaluate(txn)\n[sync, 15ms SLA]
+FRAUD --> PAY: APPROVED
+
+PAY -> ACC_A: debit(account_A, amount, expected_version=v)
+ACC_A -> DB: UPDATE accounts SET available_balance -= amount,\nversion = v+1 WHERE account_id=A AND version=v
+DB --> ACC_A: 1 row updated
+ACC_A --> PAY: debited (new_version=v+1)
+
+PAY -> ACC_B: credit(account_B, amount, expected_version=w)
+ACC_B -> DB: UPDATE accounts SET available_balance += amount,\nversion = w+1 WHERE account_id=B AND version=w
+DB --> ACC_B: 1 row updated
+ACC_B --> PAY: credited (new_version=w+1)
+
+PAY --> ORCH: saga steps complete
+ORCH -> DB: INSERT ledger_entries (debit leg, credit leg)\nUPDATE transaction SET status=COMPLETED
+ORCH -> KAFKA: outbox: txn.completed
+ORCH -> REDIS: SET idempotency:K1 = COMPLETED (result cached)
+ORCH --> GW: 200 OK {transaction_id, status: COMPLETED}
+GW --> Client: 200 OK
+
+== async, off critical path ==
+KAFKA -->> "Notification Svc": txn.completed
+KAFKA -->> "Audit Svc": txn.completed
+KAFKA -->> "Reconciliation Svc": txn.completed
+
+@enduml
+
+@startuml
+' Diagram 2 of 4: FAILURE SCENARIO 1 — Sender shard down mid-transaction (ARB Q2)
+title P2P Payment — Failure Scenario 1: Sender's DB Shard Down Mid-Transaction
+
+actor Client
+participant "API Gateway" as GW
+participant "Transaction\nOrchestrator" as ORCH
+participant "Payment\nProcessing Svc" as PAY
+participant "Account Svc\n(Shard A - sender)" as ACC_A
+database "DB Shard A\n(PRIMARY DOWN)" as DBA #FFCCCC
+database "DB Shard A\n(REPLICA)" as DBA_R
+queue "Kafka" as KAFKA
+
+Client -> GW: POST /payments
+GW -> ORCH: forward
+ORCH -> PAY: process(txn)
+PAY -> ACC_A: debit(account_A, amount, expected_version=v)
+ACC_A -> DBA: UPDATE accounts ... WHERE account_id=A
+DBA --> ACC_A: **connection timeout**\n(2 failures / 5s threshold)
+
+note over ACC_A #FFCCCC
+  **Detecting component: CB-DB-PRIMARY**
+  (circuit breaker on Account Service's
+  DB connection pool)
+  Trips after threshold met.
+  Fallback per reference table:
+  "Route reads to replica; queue writes"
+end note
+
+ACC_A -> ACC_A: CB-DB-PRIMARY OPENS
+ACC_A --> PAY: ERROR: SHARD_UNAVAILABLE\n(debit never committed)
+
+note over PAY, ORCH
+  **Compensation logic: NONE REQUIRED.**
+  The debit UPDATE never committed (no row
+  was modified — connection failed before
+  transaction commit). There is nothing to
+  roll back. This is the key correctness
+  property: partial commits cannot occur
+  because the failure happened pre-commit.
+end note
+
+PAY --> ORCH: step failed, no compensation needed
+ORCH -> ORCH: UPDATE transaction SET status=FAILED,\nfailure_reason=SHARD_UNAVAILABLE
+ORCH -> KAFKA: outbox: txn.failed
+ORCH --> GW: 503 {status: FAILED,\nreason: "shard temporarily unavailable"}
+GW --> Client: **What the user sees:**\n"Transaction could not be completed.\nNo funds were moved. Please retry."
+
+== meanwhile, in parallel — automatic failover ==
+DBA_R -> DBA_R: Patroni detects primary failure,\npromotes replica within RTO 30s
+note over DBA_R
+  Once promoted, ACC_A's connection pool
+  reconnects to new primary. CB-DB-PRIMARY
+  moves to HALF_OPEN, then CLOSED after
+  probe requests succeed. Next client retry
+  (same idempotency key) succeeds normally.
+end note
+
+@enduml
+
+@startuml
+' Diagram 3 of 4: FAILURE SCENARIO 2 — Debit succeeds, credit fails (requires compensation)
+title P2P Payment — Failure Scenario 2: Destination Shard Fails After Debit Committed
+
+actor Client
+participant "Transaction\nOrchestrator" as ORCH
+participant "Payment\nProcessing Svc" as PAY
+participant "Account Svc\n(Shard A - sender)" as ACC_A
+participant "Account Svc\n(Shard B - receiver)" as ACC_B
+database "DB Shard A" as DBA
+database "DB Shard B\n(DOWN)" as DBB #FFCCCC
+queue "Kafka" as KAFKA
+
+ORCH -> PAY: process(txn)
+PAY -> ACC_A: debit(account_A, amount)
+ACC_A -> DBA: UPDATE ... committed
+DBA --> ACC_A: success
+ACC_A --> PAY: **debited — COMMITTED**
+
+PAY -> ACC_B: credit(account_B, amount)
+ACC_B -> DBB: UPDATE accounts ...
+DBB --> ACC_B: **connection timeout**
+ACC_B --> PAY: ERROR: SHARD_UNAVAILABLE
+
+note over PAY, ORCH #FFCCCC
+  **Compensation logic: REQUIRED.**
+  The debit already committed. Money has
+  left account A but never reached account B.
+  Saga must run the compensating transaction
+  for the completed step (credit sender back).
+end note
+
+PAY --> ORCH: step failed AFTER prior commit —\ntrigger compensation
+
+ORCH -> ACC_A: compensate: credit(account_A, amount,\nreason=REVERSAL, ref=original_saga_id)
+ACC_A -> DBA: UPDATE accounts SET available_balance += amount,\nversion = v+2 WHERE account_id=A AND version=v+1
+DBA --> ACC_A: success
+ACC_A --> ORCH: compensation applied
+
+ORCH -> ORCH: UPDATE transaction SET status=REVERSED,\nfailure_reason=SHARD_UNAVAILABLE,\ncompleted_at=now()
+note over ORCH
+  Must complete within 30s per FR-005
+  (automatic reversal SLA). Compensation
+  is itself a new ledger-entry pair, not a
+  deletion — audit trail (FR-004) stays
+  immutable and complete.
+end note
+
+ORCH -> KAFKA: outbox: txn.reversed
+ORCH --> Client: **What the user sees:**\n"Transaction failed and was automatically\nreversed. Your balance is unaffected."
+
+@enduml
+
+@startuml
+' Diagram 4 of 4: FAILURE SCENARIO 3 — Client retry / duplicate idempotency key
+title P2P Payment — Failure Scenario 3: Client Retries After Timeout (Duplicate Request)
+
+actor Client
+participant "API Gateway" as GW
+participant "Transaction\nOrchestrator" as ORCH
+participant "Redis\n(idempotency)" as REDIS
+database "PostgreSQL" as DB
+
+== original request — succeeded server-side, but response lost in transit ==
+Client -> GW: POST /payments\n(Idempotency-Key: K1)
+GW -> ORCH: forward
+ORCH -> DB: process transaction fully\n(as in happy path)
+ORCH -> REDIS: SET idempotency:K1 = COMPLETED\n{transaction_id: T1, result: {...}}
+ORCH --> GW: 200 OK
+GW -x Client: **response lost**\n(network timeout on client side)
+
+== client times out, retries with SAME idempotency key ==
+Client -> GW: POST /payments\n(Idempotency-Key: K1) [RETRY]
+GW -> ORCH: forward
+ORCH -> REDIS: GET idempotency:K1
+REDIS --> ORCH: **FOUND: COMPLETED**\n{transaction_id: T1, result: {...}}
+
+note over ORCH #CCFFCC
+  **No reprocessing occurs.** The orchestrator
+  detects the key already resolved and returns
+  the cached original result directly. The
+  debit/credit logic is never re-executed —
+  this is what makes FR-002/FR-003 (idempotency
+  + exactly-once business effects) hold even
+  when the client cannot tell whether its first
+  request succeeded.
+end note
+
+ORCH --> GW: 200 OK {transaction_id: T1, status: COMPLETED}\n(identical to original response)
+GW --> Client: 200 OK — same transaction_id returned,\nno duplicate debit/credit occurred
+
+@enduml
