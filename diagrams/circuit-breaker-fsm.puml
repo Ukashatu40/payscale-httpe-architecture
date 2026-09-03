@@ -1,0 +1,37 @@
+@startuml
+' diagrams/circuit-breaker-fsm.puml
+' !pragma layout smetana
+title Circuit Breaker State Machine (generic — applies to all 7 instances below)
+
+[*] --> CLOSED
+
+state CLOSED {
+  CLOSED : Requests pass through normally
+  CLOSED : Failure counter tracked in\na rolling window
+}
+
+state OPEN {
+  OPEN : All requests immediately fail fast\nto configured fallback
+  OPEN : No calls made to the downstream\ndependency at all
+  OPEN : Waits for reset_timeout to elapse
+}
+
+state HALF_OPEN {
+  HALF_OPEN : Limited probe requests allowed through\n(single-digit count, not full traffic)
+  HALF_OPEN : Real downstream calls, real results
+}
+
+CLOSED --> OPEN : failure_count >= threshold\nwithin rolling_window
+OPEN --> HALF_OPEN : reset_timeout elapsed
+HALF_OPEN --> CLOSED : probe requests succeed
+HALF_OPEN --> OPEN : probe request fails\n(reset_timeout restarts)
+
+note right of OPEN
+  Fallback behavior is instance-specific
+  (see reference table in docs/09) —
+  the FSM shape is identical across all
+  7 breakers; only threshold, timeout,
+  and fallback action differ per target.
+end note
+
+@enduml
