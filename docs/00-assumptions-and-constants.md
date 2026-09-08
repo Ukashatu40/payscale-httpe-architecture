@@ -77,13 +77,13 @@
 - Deadline: 15 days, non-negotiable
 - Full technology autonomy, but every decision needs quantitative + trade-off justification
 
-## 8. Open Contradictions Flagged for ARB Defense
+## 8. Contradictions Flagged and Resolved
 
-These are **not yet resolved** — tracked here so every document references the same open question rather than silently picking different answers:
+Tracked here through resolution so the audit trail is visible, not deleted once closed:
 
-1. **Fraud latency budget (15ms allocated vs 25ms ML model cost)** — see `docs/09-fault-tolerance.md` for resolution options. Referenced directly in ARB Q4.
-2. **Zero RPO vs 99.99% availability under network partition** — CP/AP split needs to be stated per-subsystem (ledger writes = CP, balance display reads = AP). See `docs/03-high-level-design.md`.
-3. **"Exactly-once" terminology precision** — Kafka producer EOS ≠ end-to-end business-effect exactly-once. Corrected explicitly in `docs/07-message-queue-topology.md`.
+1. **Fraud latency budget (15ms allocated vs 25ms ML model cost).** ✅ **RESOLVED Day 9.** Two-stage design (`docs/09` §3): Stage 1 deterministic rules (3-5ms) handle the majority of volume; Stage 2 ML inference is reserved for the uncertain minority and given a genuine ≤25ms allocation, made possible by tightening other stages' budgets (`load-tests/performance-budget.md`). Bounded fallback via CB-FRAUD's existing semantics if Stage 2 still overruns.
+2. **Zero RPO vs 99.99% availability under network partition.** ✅ **RESOLVED Day 3.** Explicit CP/AP split by subsystem (`docs/03`, Cross-Cutting section): ledger writes are CP, balance-display reads and reconciliation are AP. The two properties apply to different subsystems, not the whole system uniformly.
+3. **"Exactly-once" terminology precision.** ✅ **RESOLVED Day 7.** `docs/07` §4 distinguishes exactly-once _producer_ semantics (Kafka native) from end-to-end exactly-once _business effects_ (requires idempotent consumers, implemented separately) — not conflated.
 
 ---
 

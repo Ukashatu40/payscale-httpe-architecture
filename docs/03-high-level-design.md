@@ -20,7 +20,7 @@ All numeric claims below trace to `docs/00-assumptions-and-constants.md`. Diagra
 
 **Capacity assumption:** At 12,000 TPS with ~3 hops of gateway-level work per transaction (auth, rate-limit, route), each instance handles ~750 req/s comfortably within Envoy's documented per-core throughput; 4 instances at 12K TPS provides headroom, scaling to cover the 18K burst.
 
-**Latency budget:** 3-5ms (matches reference budget — SSL offload + in-memory routing).
+**Latency budget:** Two-stage design (finalized Day 9, `docs/09` §3): Stage 1 deterministic rules 3-5ms (handles the majority of volume). Stage 2 ML inference, reserved for the uncertain minority, budgeted at ≤25ms — matching the ML team's actual stated requirement, made possible by tightening the other pipeline stages' budgets rather than squeezing fraud detection alone. **This resolves the contradiction originally flagged here on Day 1** (see `docs/00` §8, item 1) — retained as a historical note so the document's evolution stays traceable rather than silently rewritten.
 
 **Failure modes:** Instance crash → ALB health check removes from rotation within 10s, no data loss (stateless). Rate-limiter Redis unavailable → circuit breaker CB-CACHE fails open with a conservative default rate limit rather than blocking all traffic (fail-safe, not fail-closed, since blocking all traffic on a cache miss would itself violate the 99.99% availability target).
 
