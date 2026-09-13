@@ -132,7 +132,7 @@ All numeric claims below trace to `docs/00-assumptions-and-constants.md`. Diagra
 
 **Scaling model:** 4 instances, 8 vCPU/32GB each (per reference capacity table — memory-heavy for feature caching).
 
-**Latency budget:** 10-15ms allocated (feature lookup + inference). **This is the flagged contradiction (see docs/00-assumptions §8, item 1) — resolved fully in `docs/09-fault-tolerance.md` with the three-option latency-overrun response, directly answering ARB Q4.**
+**Latency budget:** Two-stage design (finalized Day 9, `docs/09` §3): Stage 1 deterministic rules 3-5ms (handles the majority of volume). Stage 2 ML inference, reserved for the uncertain minority, budgeted at ≤25ms — matching the ML team's actual stated requirement, made possible by tightening the other pipeline stages' budgets rather than squeezing fraud detection alone. **This resolves the contradiction originally flagged here on Day 1** (see `docs/00` §8, item 1) — retained as a historical note so the document's evolution stays traceable rather than silently rewritten.
 
 **Failure modes:** CB-FRAUD (3 failures/10s → 15s reset): allows transaction through with a manual-review flag rather than blocking all transactions — a deliberate choice that trades a small fraud-risk window for availability, justified because blocking all payments on fraud-service downtime would itself be a worse business outcome, and the manual-review queue provides after-the-fact recovery.
 

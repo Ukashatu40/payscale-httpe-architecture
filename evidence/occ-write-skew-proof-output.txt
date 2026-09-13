@@ -1,0 +1,21 @@
+# evidence/occ-write-skew-proof-output.txt
+# [MEASURED — captured verbatim from an actual execution of
+# evidence/occ-write-skew-proof.py. Re-running the script reproduces this
+# exactly, since the interleaving is deterministic (no real threading, no
+# randomness in the race itself).]
+
+=== NAIVE (no OCC): reproducing the write-skew race ===
+T1: read=1000, debit=800 -> debited, balance now=-400
+T2: read=1000, debit=600 -> debited, balance now=-400
+FINAL BALANCE: -400  <-- OVERDRAFT, violates CHECK(available_balance >= 0)
+
+=== OCC (version-guarded): same interleaving, correctness enforced ===
+[T1 and T2 both read version=1, balance=1000 'concurrently']
+T1: UPDATE ... WHERE version=1 -> 1 row affected, COMMITTED, balance now=200, version now=2
+T2: UPDATE ... WHERE version=1 -> 0 rows affected (version is now 2, not 1)
+
+T2 must now RETRY with a fresh read (the application-level retry loop):
+T2-retry attempt 1: read v=2 bal=200 -> REJECTED (insufficient funds on fresh read: 200 - 600 < 0)
+
+FINAL BALANCE: 200  <-- correctly reflects T1's debit; T2 correctly
+                        rejected on retry once true balance (200) is seen
