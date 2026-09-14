@@ -12,7 +12,7 @@ The 13-component diagram (`diagrams/system-architecture.drawio`). Walk the happy
 
 ## Slide 3: The Three Hardest Decisions (3 min)
 
-1. **Sharding** (`docs/06`) — account_id hash + consistent hashing, with the _actual executed_ distribution numbers (0.52% stdev, 97% vs 3% rebalance cost) on screen, not asserted.
+1. **Sharding** (`docs/06`) — account*id hash + consistent hashing, with the \_actual executed* distribution numbers (0.52% stdev, 97% vs 3% rebalance cost) on screen, not asserted.
 2. **Concurrency** (`docs/08`) — the OCC proof, side-by-side naive-vs-OCC output showing -400 vs 200.
 3. **Fraud latency** (`docs/09`, ADR-008) — the two-stage resolution, with the exact arithmetic (100 − 45 − 30 = 25ms) that answers Q4 before it's asked.
 
